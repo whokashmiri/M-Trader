@@ -1,0 +1,4 @@
+nodriver
+motor
+python-dotenv
+pydantic>=2.0
