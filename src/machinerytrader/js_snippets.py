@@ -23,92 +23,61 @@ JS_GET_CATEGORIES = r"""
 
 JS_LIST_PAGE_CARDS = r"""
 (() => {
-  const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
-  const cards = [];
-  const container = document.querySelector("#listContainer");
-  if (!container) return cards;
+  const abs = (u) => {
+    try { return new URL(u, location.origin).toString(); } catch(e) { return u || ""; }
+  };
+  const text = (el) => (el ? (el.textContent || "").replace(/\s+/g, " ").trim() : "");
 
-  container.querySelectorAll("div.list-listing-card-wrapper").forEach(w => {
-    const grid = w.querySelector("div.listing-card-grid.listing-data-selector");
-    if (!grid) return;
+  const wrappers = Array.from(document.querySelectorAll("#listContainer .list-listing-card-wrapper"));
+  return wrappers.map(w => {
+    // main listing node (has id + data attrs)
+    const main =
+      w.querySelector(".listing-card-grid[data-listing-id]") ||
+      w.querySelector("[data-listing-id]") ||
+      w.querySelector("div[id][data-price], div[id][data-item-name]") ||
+      null;
 
-    const listingId = grid.getAttribute("data-listing-id") || w.querySelector("[data-listing-id]")?.getAttribute("data-listing-id") || "";
+    const listingId =
+      (main && (main.getAttribute("data-listing-id") || "")) ||
+      (w.querySelector("[data-listing-id]")?.getAttribute("data-listing-id") || "") ||
+      (w.querySelector("div[id]")?.id || "");
 
-    // Prefer View Details or title link
+    // prefer title link
     const a =
-      w.querySelector("a.view-listing-details-link[href]") ||
       w.querySelector("a.list-listing-title-link[href]") ||
-      w.querySelector("a[aria-label^='View Details'][href]");
+      w.querySelector("a.view-listing-details-link[href]") ||
+      w.querySelector("a[href*='/listing/for-sale/']");
 
-    const href = a ? (a.getAttribute("href") || "") : "";
+    const href = a ? abs(a.getAttribute("href") || "") : "";
 
-    // Detect auction
-    const priceBox = w.querySelector(".retail-price-container");
+    // auction detection: if Current Bid / auction price exists, skip later
     const hasAuctionPrice = !!w.querySelector(".auction-price");
-    const isAuctionByText = /current bid/i.test(norm(priceBox?.textContent || ""));
-    const isAuctionByTiles = !!w.querySelector(".lot-number, .live-tile, .left-flavor.at");
-    const isExternal = href.startsWith("http") && !href.includes("machinerytrader.com");
-    const isAuction = hasAuctionPrice || isAuctionByText || isAuctionByTiles || isExternal;
+    const hasLot = !!w.querySelector(".lot-number, .live-tile, .left-flavor.at");
+    const isAuction = hasAuctionPrice || hasLot || /auctiontime\.com|equipmentfacts\.com/i.test(href);
 
-    // Quick fields from card
-    const title = norm(w.querySelector(".listing-portion-title")?.getAttribute("title") || w.querySelector(".listing-portion-title")?.textContent || "");
-    const cardCategory = norm(w.querySelector(".listing-category")?.textContent || "");
-    const priceText = norm(w.querySelector(".retail-price-container .price")?.textContent || "");
+    // retail price text (if present)
+    const priceText = text(w.querySelector(".retail-price-container .price"));
 
-    // Image (first)
-    const img = w.querySelector("img.listing-main-img");
-    const image = img ? (img.getAttribute("src") || "") : "";
+    // images: collect visible src + any data-src style
+    const imgs = Array.from(w.querySelectorAll("img.listing-main-img"))
+      .map(img => img.getAttribute("src") || img.getAttribute("data-src") || "")
+      .filter(Boolean)
+      .map(abs);
 
-    // Location (card-level)
-    const locationText = norm(w.querySelector(".machine-location")?.textContent || "");
+    // de-dupe
+    const images = Array.from(new Set(imgs));
 
-    // Seller (card-level)
-    const sellerText = norm(w.querySelector(".seller")?.textContent || "");
-    const phone = norm(w.querySelector("a.phone-link strong")?.textContent || w.querySelector("a.phone-link")?.textContent || "");
-    const phoneHref = w.querySelector("a.phone-link")?.getAttribute("href") || "";
-
-    // data-* attrs (on the main listing node; in your sample: inside list-premium-listing)
-    const root = w.querySelector("[data-item-name]") || w.querySelector("[data-currency]") || w.querySelector("[data-price]") || w;
-    const currency = root.getAttribute("data-currency") || "";
-    const brand = root.getAttribute("data-item-brand") || "";
-    const itemCategory = root.getAttribute("data-item-category") || "";
-    const itemName = root.getAttribute("data-item-name") || "";
-    const priceNum = root.getAttribute("data-price") || "";
-    const offers = root.getAttribute("data-offers") || "";
-
-    // Specs visible on card (Hours, etc.)
-    const specs = {};
-    w.querySelectorAll(".list-spec .spec").forEach(s => {
-      const k = norm(s.querySelector(".spec-label")?.textContent || "").replace(/:\s*$/,"");
-      const v = norm(s.querySelector(".spec-value")?.textContent || "");
-      if (k) specs[k] = v;
-    });
-
-    cards.push({
+    return {
       listingId,
       href,
       isAuction,
-      title,
-      cardCategory,
       priceText,
-      image,
-      locationText,
-      sellerText,
-      phone,
-      phoneHref,
-      currency,
-      brand,
-      itemCategory,
-      itemName,
-      priceNum,
-      offers,
-      cardSpecs: specs,
-    });
+      images
+    };
   });
-
-  return cards;
 })()
 """.strip()
+
 
 JS_IS_DISABLED = r"""
 (selector) => {
@@ -140,8 +109,16 @@ JS_CLICK = r"""
 }
 """.strip()
 
+
+
 JS_GET_DETAIL = r"""
 (() => {
+  const abs = (u) => {
+    try { return new URL(u, location.origin).toString(); } catch(e) { return u || ""; }
+  };
+
+  const uniq = (arr) => Array.from(new Set((arr || []).filter(Boolean)));
+
   const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
   const text = (sel) => norm(document.querySelector(sel)?.textContent || "");
 
@@ -188,19 +165,14 @@ JS_GET_DETAIL = r"""
   const loc = document.querySelector("div.detail__machine-location");
   if (loc) {
     const full = norm(loc.textContent || "");
-    // full often like: "Machine Location: 3431 SE 21st St Topeka, Kansas 66607"
     out.machineLocationText = full;
 
-    // try to take the "City" part before comma after street
-    // if we have an address span, remove it first
     const street = norm(loc.querySelector("span.detail__machine-location-address")?.textContent || "");
     let tail = full;
     if (street && tail.includes(street)) {
       tail = tail.split(street).slice(1).join(street).trim();
     }
-    // tail now often: "Topeka, Kansas 66607"
-    const city = norm((tail.split(",")[0] || "").trim());
-    out.city = city;
+    out.city = norm((tail.split(",")[0] || "").trim());
   }
 
   // --------------------
@@ -223,7 +195,7 @@ JS_GET_DETAIL = r"""
   }
 
   // --------------------
-  // Specs (ALL sections)
+  // Specs (ALL sections) + Updated
   // --------------------
   const specs = {};
   let updatedText = "";
@@ -245,10 +217,7 @@ JS_GET_DETAIL = r"""
         for (let j = 0; j < n; j++) {
           const k = norm(labels[j].textContent || "");
           const v = norm(values[j].textContent || "");
-
           if (k) specs[currentSection][k] = v;
-
-          // Capture "Updated" date if present anywhere
           if (/^updated$/i.test(k)) updatedText = v;
         }
       }
@@ -257,6 +226,28 @@ JS_GET_DETAIL = r"""
 
   out.specs = specs;
   out.updatedText = updatedText;
+
+  // --------------------
+  // Images (USE ONE SOURCE: thumbnails)
+  // --------------------
+  const imgSet = [];
+
+  // Prefer thumbs: usually includes ALL images
+  document.querySelectorAll(".mc-thumb-slider img").forEach(img => {
+    const u = img.getAttribute("data-src") || img.getAttribute("src") || "";
+    if (u) imgSet.push(abs(u));
+  });
+
+  // Fallback: if no thumbs, take the main image
+  if (imgSet.length === 0) {
+    const main = document.querySelector(".mc-img img");
+    if (main) {
+      const u = main.getAttribute("data-fullscreen") || main.getAttribute("src") || "";
+      if (u) imgSet.push(abs(u));
+    }
+  }
+
+  out.images = uniq(imgSet);
 
   return out;
 })()

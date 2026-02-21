@@ -431,12 +431,53 @@ async def _scrape_listing_detail(tab: Any, listing_url: str, category: Dict[str,
     )
     await _close_popups(tab)
 
-    detail = await tab.evaluate(JS_GET_DETAIL)
-    detail = unwrap_remote(detail)
-    if isinstance(detail, list):
-        detail = as_dict(detail)
-    if not isinstance(detail, dict):
-        detail = {}
+    # -------------------------
+    # Read + normalize detail
+    # -------------------------
+    raw = await tab.evaluate(JS_GET_DETAIL)
+    raw = unwrap_remote(raw)
+
+    # If nodriver returns list-of-pairs, convert to dict BEFORE .get()
+    if isinstance(raw, list):
+        raw = as_dict(raw)
+
+    if not isinstance(raw, dict):
+        raw = {}
+
+    detail: Dict[str, Any] = raw
+
+    # seller: ensure dict (flat)
+    seller = detail.get("seller")
+    seller = unwrap_remote(seller)
+    if isinstance(seller, list):
+        seller = as_dict(seller)
+    if not isinstance(seller, dict):
+        seller = {}
+    detail["seller"] = seller
+
+    # specs: ensure dict-of-dicts (flat)
+    specs = detail.get("specs")
+    specs = unwrap_remote(specs)
+    if isinstance(specs, list):
+        specs = as_dict(specs)
+
+    clean_specs: Dict[str, Any] = {}
+    if isinstance(specs, dict):
+        for section, values in specs.items():
+            values = unwrap_remote(values)
+            if isinstance(values, list):
+                values = as_dict(values)
+            if isinstance(values, dict):
+                clean_specs[str(section)] = values
+    detail["specs"] = clean_specs
+
+    # images: ensure list[str]
+    images = detail.get("images")
+    images = unwrap_remote(images)
+    if not isinstance(images, list):
+        images = []
+    images = [str(x) for x in images if isinstance(x, (str, int, float)) and str(x).strip()]
+    detail["images"] = images
 
     listing_id = listing_id_from_url(listing_url)
     now = datetime.now(timezone.utc).isoformat()
@@ -455,12 +496,12 @@ async def _scrape_listing_detail(tab: Any, listing_url: str, category: Dict[str,
         "priceText": detail.get("priceText") or "",
         "city": detail.get("city") or "",
         "machineLocationText": detail.get("machineLocationText") or "",
+        "images": detail.get("images") or [],
         "seller": detail.get("seller") or {},
         "specs": detail.get("specs") or {},
         "updatedText": detail.get("updatedText") or "",
         "scrapedAt": now,
     }
-
 
 async def _scrape_category(tab: Any, category: Dict[str, Any], col, settings) -> int:
     url = category["url"]
@@ -518,6 +559,14 @@ async def _scrape_category(tab: Any, category: Dict[str, Any], col, settings) ->
                 log(f"[open] {listing_id} {href}")
                 doc = await _scrape_listing_detail(tab, href, category, settings)
                 if doc and doc.get("_id"):
+    # add list-page images (fast + reliable)
+                    card_imgs = c.get("images") or []
+                    if isinstance(card_imgs, list) and card_imgs:
+                        existing = doc.get("images") or []
+                        if not isinstance(existing, list):
+                            existing = []
+                            doc["images"] = list(dict.fromkeys([*existing, *card_imgs]))  # preserve order, unique
+
                     await upsert_listing(col, doc)
                     new_count += 1
                     log(f"[save] new id={listing_id} title={doc.get('title','')}")
