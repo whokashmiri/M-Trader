@@ -58,9 +58,11 @@ class Settings(BaseModel):
 
         # Normalize empty strings to None (extra safety)
         if self.CATEGORY_ID is not None and not self.CATEGORY_ID.strip():
+            
             self.CATEGORY_ID = None
         if self.CATEGORY_LABEL is not None and not self.CATEGORY_LABEL.strip():
             self.CATEGORY_LABEL = None
+
 
         # If CATEGORY_PICK <= 0 treat as not set
         if self.CATEGORY_PICK is not None and self.CATEGORY_PICK <= 0:
