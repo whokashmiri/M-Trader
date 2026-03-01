@@ -628,42 +628,77 @@ async def _scrape_one_category_in_new_browser(category: Dict[str, Any], settings
 async def run_once(browser: Any, settings) -> int:
     col = get_collection(settings.MONGO_URI, settings.DB_NAME, settings.COLLECTION)
 
+    # 1) Read categories
     start_tab = await browser.get(settings.START_URL)
     categories = await _open_categories_only(start_tab, settings.START_URL, settings.PAGE_TIMEOUT_SEC)
     if not categories:
         log("[run] no categories found")
         return 0
 
-    raw_limit = getattr(settings, "CATEGORY_CONCURRENCY", None)
+    # Optional: show user the order (so CATEGORY_PICK is easy)
+    log("[cats] available categories (CATEGORY_PICK is 1-based):")
+    for i, c in enumerate(categories, start=1):
+        log(f"  {i}) {c.get('label','')} | id={c.get('categoryId','')} | url={c.get('url','')}")
+
+    # 2) Choose ONE category by env
+    pick = getattr(settings, "CATEGORY_PICK", None)
+    cid = getattr(settings, "CATEGORY_ID", None)
+    clabel = getattr(settings, "CATEGORY_LABEL", None)
+
+    selected = None
+
+    # Priority: CATEGORY_ID -> CATEGORY_LABEL -> CATEGORY_PICK
+    if cid:
+        cid_s = str(cid).strip()
+        for c in categories:
+            if str(c.get("categoryId") or "").strip() == cid_s:
+                selected = c
+                break
+        if not selected:
+            log(f"[run] CATEGORY_ID={cid_s} not found. Set CATEGORY_PICK or check ids above.")
+            return 0
+
+    elif clabel:
+        want = str(clabel).strip().lower()
+        for c in categories:
+            if str(c.get("label") or "").strip().lower() == want:
+                selected = c
+                break
+        if not selected:
+            # fallback: contains match
+            for c in categories:
+                if want and want in str(c.get("label") or "").strip().lower():
+                    selected = c
+                    break
+        if not selected:
+            log(f"[run] CATEGORY_LABEL={clabel!r} not found. Set CATEGORY_PICK or check labels above.")
+            return 0
+
+    elif pick:
+        try:
+            idx = int(pick)
+        except Exception:
+            idx = 0
+        if idx <= 0 or idx > len(categories):
+            log(f"[run] CATEGORY_PICK must be between 1 and {len(categories)} (got {pick}).")
+            return 0
+        selected = categories[idx - 1]
+
+    else:
+        log("[run] No category selection provided.")
+        log("      Set one of: CATEGORY_PICK=1  OR  CATEGORY_ID=1055  OR  CATEGORY_LABEL=\"Skid Steers\"")
+        return 0
+
+    # 3) Run ONLY the selected category in a fresh browser (pagination stays stable)
+    log(f"[run] Selected category -> {selected.get('label')} (id={selected.get('categoryId')})")
     try:
-        limit = int(raw_limit)
-    except (TypeError, ValueError):
-        limit = 2
+        new_count = await _scrape_one_category_in_new_browser(selected, settings, col)
+    except Exception as e:
+        log(f"[run] selected category failed {selected.get('label')} err={e}")
+        return 0
 
-    if limit <= 0:
-        limit = len(categories)
-    limit = min(limit, len(categories))
-
-    log(f"[run] CATEGORY_CONCURRENCY={limit}")
-
-    sem = asyncio.Semaphore(limit)
-
-    async def worker(cat: Dict[str, Any]) -> int:
-        async with sem:
-            active = limit - sem._value
-            log(f"[debug] ACTIVE_BROWSERS={active}/{limit} -> {cat.get('label')}")
-            try:
-                return await _scrape_one_category_in_new_browser(cat, settings, col)
-            except Exception as e:
-                log(f"[run] category failed {cat.get('label')} err={e}")
-                return 0
-
-    results = await asyncio.gather(*(worker(c) for c in categories))
-    total_new = sum(int(x or 0) for x in results)
-
-    log(f"[run] DONE total_new={total_new} categories={len(categories)} concurrency={limit}")
-    return total_new
-
+    log(f"[run] DONE total_new={new_count} categories=1 (manual mode)")
+    return int(new_count or 0)
 
 async def run_forever(browser: Any, settings) -> None:
     while True:
