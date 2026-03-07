@@ -44,6 +44,9 @@ class Settings(BaseModel):
     SLEEP_AFTER_FULL_RUN_SEC: int = Field(default_factory=lambda: _env_int("SLEEP_AFTER_FULL_RUN_SEC", 86400))
     MAX_PAGES_PER_CATEGORY: int = Field(default_factory=lambda: _env_int("MAX_PAGES_PER_CATEGORY", 0))
 
+    MAX_CARDS: int = Field(default_factory=lambda: int(os.getenv("MAX_CARDS", "0")))
+    DETAIL_CONCURRENCY: int = Field(default_factory=lambda: int(os.getenv("DETAIL_CONCURRENCY", "2")))
+
     # Concurrency (still used if you ever scrape all categories)
     CATEGORY_CONCURRENCY: int = Field(default_factory=lambda: _env_int("CATEGORY_CONCURRENCY", 2))
 

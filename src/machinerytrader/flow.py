@@ -503,6 +503,7 @@ async def _scrape_listing_detail(tab: Any, listing_url: str, category: Dict[str,
         "scrapedAt": now,
     }
 
+
 async def _scrape_category(tab: Any, category: Dict[str, Any], col, settings) -> int:
     url = category["url"]
     log(f"[cat] {category.get('label') or url}")
@@ -513,11 +514,66 @@ async def _scrape_category(tab: Any, category: Dict[str, Any], col, settings) ->
 
     await _wait_for(tab, "div#listContainer", timeout=settings.PAGE_TIMEOUT_SEC)
     await _wait_for(tab, 'nav[aria-label="pagination navigation"]', timeout=settings.PAGE_TIMEOUT_SEC)
-
     await _close_popups(tab)
 
     new_count = 0
     page_no = 1
+
+    # parallel limiter (per category browser)
+    sem = asyncio.Semaphore(int(settings.DETAIL_CONCURRENCY or 1))
+
+    async def scrape_one_card_in_new_tab(card: Dict[str, Any]) -> int:
+        async with sem:
+            href = abs_url(str(card.get("href") or ""))
+            listing_id = str(card.get("listingId") or "").strip() or listing_id_from_url(href)
+            if not href or not listing_id:
+                return 0
+
+            # Dedup BEFORE opening new tab
+            if await already_have(col, listing_id):
+                return 0
+
+            # Light jitter to reduce “super-human speed”
+            await asyncio.sleep(0.3 + random.random() * 1.0)
+
+            t = None
+            try:
+                # open detail in NEW TAB so list tab stays stable
+                t = await tab.browser.get(href, new_tab=True) if hasattr(tab, "browser") else None
+                if t is None:
+                    # fallback: if tab.browser isn’t available in your nodriver version,
+                    # use uc.start-per-category approach where you have "browser" object.
+                    # (Tell me your nodriver Tab API if this hits.)
+                    return 0
+
+                if not await _assert_not_blocked(t, "detail"):
+                    return 0
+
+                doc = await _scrape_listing_detail(t, href, category, settings)
+                if not doc or not doc.get("_id"):
+                    return 0
+
+                # merge list images if you already collect them in JS_LIST_PAGE_CARDS
+                card_imgs = card.get("images") or []
+                if isinstance(card_imgs, list) and card_imgs:
+                    existing = doc.get("images") or []
+                    if not isinstance(existing, list):
+                        existing = []
+                    doc["images"] = list(dict.fromkeys([*existing, *card_imgs]))
+
+                await upsert_listing(col, doc)
+                log(f"[save] new id={listing_id} title={doc.get('title','')}")
+                return 1
+
+            except Exception as e:
+                log(f"[err] detail failed id={listing_id} err={e}")
+                return 0
+            finally:
+                try:
+                    if t is not None:
+                        await t.close()
+                except Exception:
+                    pass
 
     while True:
         if not await _assert_not_blocked(tab, f"category-page-{page_no}"):
@@ -526,67 +582,31 @@ async def _scrape_category(tab: Any, category: Dict[str, Any], col, settings) ->
         await _wait_for(tab, "div#listContainer", timeout=settings.PAGE_TIMEOUT_SEC)
         await _wait_for(tab, 'nav[aria-label="pagination navigation"]', timeout=settings.PAGE_TIMEOUT_SEC)
 
-
         raw_cards = await tab.evaluate(JS_LIST_PAGE_CARDS)
         raw_cards = unwrap_remote(raw_cards)
         if not isinstance(raw_cards, list):
             raw_cards = []
 
         cards = [as_dict(x) for x in raw_cards]
-        auction_n = sum(1 for x in cards if x.get("isAuction"))
-        log(f"[cat] page={page_no} cards={len(cards)} auctions={auction_n}")
 
+        # keep only valid non-auction machinerytrader detail URLs
+        clean_cards: List[Dict[str, Any]] = []
         for c in cards:
-            # must be a machinerytrader listing detail
+            if c.get("isAuction"):
+                continue
             href = abs_url(str(c.get("href") or ""))
             if not href.startswith("https://www.machinerytrader.com/"):
                 continue
             if "/listing/for-sale/" not in href:
                 continue
+            clean_cards.append(c)
 
-            # skip auction cards
-            if c.get("isAuction"):
-                continue
+        auction_n = sum(1 for x in cards if x.get("isAuction"))
+        log(f"[cat] page={page_no} cards={len(cards)} usable={len(clean_cards)} auctions={auction_n} parallel={settings.DETAIL_CONCURRENCY}")
 
-            listing_id = str(c.get("listingId") or "").strip() or listing_id_from_url(href)
-            if not listing_id:
-                continue
-
-            if await already_have(col, listing_id):
-                continue
-
-            try:
-                log(f"[open] {listing_id} {href}")
-                doc = await _scrape_listing_detail(tab, href, category, settings)
-                if doc and doc.get("_id"):
-    # add list-page images (fast + reliable)
-                    card_imgs = c.get("images") or []
-                    if isinstance(card_imgs, list) and card_imgs:
-                        existing = doc.get("images") or []
-                        if not isinstance(existing, list):
-                            existing = []
-                            doc["images"] = list(dict.fromkeys([*existing, *card_imgs]))  # preserve order, unique
-
-                    await upsert_listing(col, doc)
-                    new_count += 1
-                    log(f"[save] new id={listing_id} title={doc.get('title','')}")
-            except Exception as e:
-                log(f"[err] detail failed id={listing_id} err={e}")
-
-            # back to list
-            try:
-                await tab.back()
-                await _wait_for(tab, "div#listContainer", timeout=settings.PAGE_TIMEOUT_SEC)
-                await _wait_for(tab, 'nav[aria-label="pagination navigation"]', timeout=settings.PAGE_TIMEOUT_SEC)
-
-            except Exception:
-                await tab.get(url)
-                await _wait_for(tab, "div#listContainer", timeout=settings.PAGE_TIMEOUT_SEC)
-                await _wait_for(tab, 'nav[aria-label="pagination navigation"]', timeout=settings.PAGE_TIMEOUT_SEC)
-
-
-            # gentle pacing
-            await asyncio.sleep(1.0 + random.random() * 3)
+        # 🔥 PARALLEL SCRAPE THIS PAGE
+        results = await asyncio.gather(*(scrape_one_card_in_new_tab(c) for c in clean_cards))
+        new_count += sum(int(x or 0) for x in results)
 
         if settings.MAX_PAGES_PER_CATEGORY and page_no >= settings.MAX_PAGES_PER_CATEGORY:
             break
@@ -596,12 +616,12 @@ async def _scrape_category(tab: Any, category: Dict[str, Any], col, settings) ->
             break
 
         page_no += 1
-        await asyncio.sleep(1.0 + random.random() * 3.0)
+        await asyncio.sleep(0.7 + random.random() * 2.0)
 
     await _goto_first_page(tab, settings)
-
     log(f"[cat:done] {category.get('label')} new={new_count} pages={page_no}")
     return new_count
+
 
 
 async def _scrape_one_category_in_new_browser(category: Dict[str, Any], settings, col) -> int:
