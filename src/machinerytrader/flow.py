@@ -164,12 +164,46 @@ async def _wait_for(page: Any, css: str, timeout: float = 60.0) -> bool:
     return False
 
 
-async def _assert_not_blocked(tab: Any, where: str = "") -> bool:
+
+async def _wait_until_unblocked(tab: Any, where: str = "", timeout_sec: int = 900) -> bool:
+    """
+    Pause on the block/captcha page so the user can solve it manually.
+    Returns True when the block page disappears, False on timeout.
+    """
+    log(f"[block] Detected block page{(' @ ' + where) if where else ''}. Waiting for manual solve...")
+
+    waited = 0
+    interval = 2
+
+    while waited < timeout_sec:
+        await asyncio.sleep(interval)
+        waited += interval
+
+        try:
+            blocked = await tab.evaluate(JS_IS_BLOCKED)
+            blocked = unwrap_remote(blocked)
+        except Exception:
+            blocked = True
+
+        if not blocked:
+            log(f"[block] Manual solve detected{(' @ ' + where) if where else ''}. Resuming scraping.")
+            await asyncio.sleep(1.5)
+            return True
+
+        if waited % 30 == 0:
+            log(f"[block] Still waiting for manual solve... {waited}s elapsed{(' @ ' + where) if where else ''}")
+
+    log(f"[block] Timed out waiting for manual solve{(' @ ' + where) if where else ''}")
+    return False
+
+async def _assert_not_blocked(tab: Any, where: str = "", wait_for_manual: bool = True) -> bool:
     try:
         blocked = await tab.evaluate(JS_IS_BLOCKED)
         blocked = unwrap_remote(blocked)
         if blocked:
-            log(f"[block] Detected block page{(' @ ' + where) if where else ''}. Stopping this category browser.")
+            if wait_for_manual:
+                return await _wait_until_unblocked(tab, where=where, timeout_sec=1800)
+            log(f"[block] Detected block page{(' @ ' + where) if where else ''}.")
             return False
     except Exception:
         pass
